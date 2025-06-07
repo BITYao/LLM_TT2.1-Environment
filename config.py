@@ -45,6 +45,12 @@ TTS_VOICE_ID = 0  # 语音ID，0为默认女声，1为男声
 TTS_RATE = 180    # 语音速度
 TTS_VOLUME = 0.8  # 语音音量
 
+# 心跳机制配置
+HEARTBEAT_INTERVAL = 2.0          # 心跳间隔（秒）
+HEARTBEAT_MAX_FAILURES = 5        # 最大连续失败次数
+COMMAND_EXECUTION_DELAY = 0.8     # 指令间执行延迟（秒）
+HEARTBEAT_PAUSE_ON_COMMAND = True # 执行指令时暂停心跳
+
 # 视觉识别配置
 VISION_AUTO_RECOGNITION_INTERVAL = 5.0  # 自动识别间隔（秒）
 VISION_CAPTURE_FOLDER = "picturecap"    # 图片保存文件夹
@@ -80,10 +86,15 @@ SYSTEM_PROMPT = """
 - flip X: 翻滚（l/r/f/b分别表示左/右/前/后）
 
 支持的巡航命令：
-- start_cruise: 开始随机巡航模式
-- stop_cruise: 停止巡航模式
-- cruise_status: 查看巡航状态
+- start_cruise: 开始随机避障模式
+- stop_cruise: 停止随机避障模式
+- cruise_status: 查看避障模式状态
 - tof_distance: 查看激光测距数据
+
+支持的巡线命令：
+- start_linetrack: 开始巡线/循迹跟踪模式（需要先起飞）
+- stop_linetrack: 停止巡线/循迹跟踪模式
+- linetrack_status: 查看巡线/循迹状态
 
 支持的视觉感知命令：
 - start_video: 启动视频流
@@ -116,6 +127,17 @@ SYSTEM_PROMPT = """
 用户说："显示Hello World" -> 返回："display_text Hello World"
 用户说："先起飞，再显示欢迎，然后灯光变为蓝色" -> 返回："takeoff;display_text Welcome;led_color blue"
 用户说："先拍照再识别当前画面" -> 返回："capture_image;recognize_view"
+用户说："开始巡线" -> 返回："start_linetrack"
+用户说："停止巡线" -> 返回："stop_linetrack"
+用户说："查看巡线状态" -> 返回："linetrack_status"
+用户说："先起飞然后开始巡线" -> 返回："takeoff;start_linetrack"
+
+对于部分关于飞行的模糊指令，请用分号(;)分隔多个命令，形成一个合理的指令队列，按执行顺序排列。
+
+示例：
+用户说："飞一个矩形" -> 返回："forward 50;rotate_cw 90;forward 50;rotate_cw 90;forward 50;rotate_cw 90;forward 50;rotate_cw 90"
+用户说："飞一个三角形" -> 返回："forward 50;rotate_cw 120;forward 50;rotate_cw 120;forward 50;rotate_cw 120"
+用户说："飞一个六边形" -> 返回："forward 50;rotate_cw 60....(以此类推)"
 
 对于点阵屏显示，如果用户说的是中文，请转换为对应的英文显示。
 

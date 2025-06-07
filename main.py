@@ -158,10 +158,12 @@ class TelloVoiceControl:
         print("支持LED控制：如'将灯光调节为粉色'，'设置红色呼吸灯'")
         print("支持点阵屏：如'显示Hello World'，'显示欢迎'")
         print("支持巡航模式：如'开始巡航'，'停止巡航'，'查看测距'")
+        print("支持巡线模式：如'开始巡线'，'停止巡线'，'巡线状态'")
         print("💡 按键语音控制模式:")
         print("   - 按 [V] 键激活/关闭语音模式")
         print("   - 按住 [空格] 键说话")
-        print("   - 输入 's' 查看状态, 输入 'c' 开始巡航, 输入 'x' 停止巡航, 输入 'q' 退出系统")
+        print("   - 输入 's' 查看状态, 输入 'c' 开始巡航, 输入 'l' 开始巡线")
+        print("   - 输入 'x' 停止所有模式, 输入 'q' 退出系统")
         print("-" * 40)
         
         # 启动语音监听（在后台线程中运行）
@@ -189,7 +191,7 @@ class TelloVoiceControl:
                     try:
                         import msvcrt
                         if msvcrt.kbhit():
-                            user_input = input("\n请输入命令 (s=状态, c=巡航, x=停止巡航, q=退出): ").strip().lower()
+                            user_input = input("\n请输入命令 (s=状态, c=巡航, l=巡线, x=停止所有模式, q=退出): ").strip().lower()
                             if user_input == 's':
                                 status = self.get_status()
                                 print(f"📊 当前状态: {status}")
@@ -206,11 +208,23 @@ class TelloVoiceControl:
                                 else:
                                     print("⚠ 无人机未在飞行中，无法开始巡航")
                             
+                            elif user_input == 'l':
+                                # 开始巡线
+                                if self.tello_controller.flying:
+                                    success = self.execute_command("start_linetrack")
+                                    if not success:
+                                        print("❌ 启动巡线失败")
+                                else:
+                                    print("⚠ 无人机未在飞行中，无法开始巡线")
+                            
                             elif user_input == 'x':
-                                # 停止巡航
-                                success = self.execute_command("stop_cruise")
-                                if not success:
-                                    print("❌ 停止巡航失败")
+                                # 停止所有模式
+                                success1 = self.execute_command("stop_cruise")
+                                success2 = self.execute_command("stop_linetrack")
+                                if success1 or success2:
+                                    print("✓ 已停止所有自动模式")
+                                else:
+                                    print("❌ 停止模式失败")
                             
                             elif user_input == 'q':
                                 print("🛑 退出系统")
@@ -222,7 +236,7 @@ class TelloVoiceControl:
                                 self.voice_controller.toggle_voice_mode()
                             
                             elif user_input != '':
-                                print("❌ 无效输入，请输入 's', 'c', 'x', 'v' 或 'q'")
+                                print("❌ 无效输入，请输入 's', 'c', 'l', 'x', 'v' 或 'q'")
                     except:
                         # 如果 msvcrt 不可用，使用简单轮询
                         pass
@@ -267,7 +281,7 @@ def main():
     """主函数"""
     print("Tello编队语音控制系统 v2.4 - 重构版")
     print("作者: 杨垚，乔明梁") 
-    print("模式: 编队单机控制 + 百度语音识别 + 复合指令支持")
+    print("模式: 编队单机控制 + 百度语音识别 + 复合指令支持 + 巡线功能")
     print("架构: 模块化重构 - 控制器分离")
     print("-" * 40)
     

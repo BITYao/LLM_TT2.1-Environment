@@ -7,9 +7,10 @@ from djitellopy import TelloSwarm
 from config import LED_COLOR_MAP, CHINESE_TO_ENGLISH
 from cruise_module import CruiseModule
 from vision_module import VisionModule
+from linetrack_module import LineTrackModule
 
 class TelloExtendedController:
-    def __init__(self, tello_ip="192.168.37.180"):
+    def __init__(self, tello_ip="192.168.14.180"):
         self.tello_ip = tello_ip
         self.swarm = None
         self.single_tello = None
@@ -17,6 +18,7 @@ class TelloExtendedController:
         self.flying = False
         self.cruise_module = None
         self.vision_module = None
+        self.linetrack_module = None
     
     def connect(self):
         """连接到Tello（编队模式）"""
@@ -50,6 +52,10 @@ class TelloExtendedController:
             self.vision_module = VisionModule(self.single_tello)
             print("✓ 视觉感知模块已初始化（编队模式兼容）")
             
+            # 初始化巡线模块
+            self.linetrack_module = LineTrackModule(self)
+            print("✓ 巡线模块已初始化")
+            
             # 测试视频流连接（可选）
             print("🔍 测试视频流连接...")
             if self.vision_module.start_video_stream():
@@ -77,6 +83,11 @@ class TelloExtendedController:
                 print("🔍 清理视觉感知模块...")
                 self.vision_module.cleanup()
             
+            # 清理巡线模块
+            if self.linetrack_module:
+                print("🚁 清理巡线模块...")
+                self.linetrack_module.cleanup()
+            
             if self.flying and self.connected:
                 print("🛬 无人机正在降落...")
                 self.single_tello.land()
@@ -102,7 +113,7 @@ class TelloExtendedController:
             return 0
     
     def get_status(self):
-        """获取状态信息（包含视觉状态）"""
+        """获取状态信息（包含巡线状态）"""
         if not self.connected:
             return "未连接"
         
@@ -119,7 +130,12 @@ class TelloExtendedController:
             if self.vision_module:
                 vision_status = f" | 视觉: {self.vision_module.get_vision_status()}"
             
-            status = f"电池: {battery}% | 飞行状态: {'飞行中' if self.flying else '地面'}{cruise_status}{vision_status} | 模式: 复合指令控制"
+            # 获取巡线状态
+            linetrack_status = ""
+            if self.linetrack_module:
+                linetrack_status = f" | 巡线: {self.linetrack_module.get_tracking_status()}"
+            
+            status = f"电池: {battery}% | 飞行状态: {'飞行中' if self.flying else '地面'}{cruise_status}{vision_status}{linetrack_status} | 模式: 复合指令控制"
             return status
         except:
             return "状态获取失败"
@@ -233,7 +249,7 @@ class TelloExtendedController:
                 english_text = self._translate_chinese_to_english(text)
                 
                 # 发送点阵屏滚动显示命令（蓝色，向左滚动，1Hz）
-                mled_cmd = f"mled l b 1 {english_text}"
+                mled_cmd = f"mled l r 1 {english_text}"
                 self.single_tello.send_expansion_command(mled_cmd)
                 print(f"📺 点阵屏显示: '{text}' -> '{english_text}'")
                 return True
@@ -297,6 +313,46 @@ class TelloExtendedController:
                 
         except Exception as e:
             print(f"❌ 巡航指令执行失败: {e}")
+            return False
+
+    def execute_linetrack_command(self, command):
+        """执行巡线相关指令"""
+        try:
+            cmd = command.lower()
+            
+            if cmd == "start_linetrack":
+                if self.flying and self.linetrack_module:
+                    success = self.linetrack_module.start_line_tracking()
+                    if success:
+                        print("✓ 巡线模式已启动")
+                    return success
+                else:
+                    print("⚠ 无人机未在飞行中或巡线模块未初始化")
+                    return False
+            
+            elif cmd == "stop_linetrack":
+                if self.linetrack_module:
+                    self.linetrack_module.stop_line_tracking()
+                    print("✓ 巡线模式已停止")
+                    return True
+                else:
+                    print("⚠ 巡线模块未初始化")
+                    return False
+            
+            elif cmd == "linetrack_status":
+                if self.linetrack_module:
+                    status = self.linetrack_module.get_tracking_status()
+                    print(f"📊 巡线状态: {status}")
+                    return True
+                else:
+                    print("⚠ 巡线模块未初始化")
+                    return False
+            
+            else:
+                return False
+                
+        except Exception as e:
+            print(f"❌ 巡线指令执行失败: {e}")
             return False
 
     def execute_vision_command(self, command):
@@ -408,12 +464,16 @@ class TelloExtendedController:
             return False
 
     def execute_basic_command(self, command):
-        """执行基本飞行指令（增加视觉相关指令）"""
+        """执行基本飞行指令（增加巡线相关指令）"""
         if not self.connected:
             print("Tello未连接")
             return False
         
         try:
+            # 检查是否为巡线指令
+            if command.startswith(("start_linetrack", "stop_linetrack", "linetrack_status")):
+                return self.execute_linetrack_command(command)
+            
             # 检查是否为视觉指令
             if command.startswith(("start_video", "stop_video", "capture_image", "recognize_view", 
                                  "start_auto_recognition", "stop_auto_recognition", "vision_status", "show_video")):
@@ -447,9 +507,11 @@ class TelloExtendedController:
             elif cmd == "land":
                 if self.flying:
                     try:
-                        # 停止巡航
+                        # 停止巡航和巡线
                         if self.cruise_module:
                             self.cruise_module.stop_cruise()
+                        if self.linetrack_module:
+                            self.linetrack_module.stop_line_tracking()
                         
                         self.single_tello.land()
                         time.sleep(3)  # 等待降落完成
@@ -466,6 +528,8 @@ class TelloExtendedController:
                             self.flying = False
                             if self.cruise_module:
                                 self.cruise_module.stop_cruise()
+                            if self.linetrack_module:
+                                self.linetrack_module.stop_line_tracking()
                             print("✓ 紧急停止成功")
                             return True
                         except:
@@ -477,9 +541,11 @@ class TelloExtendedController:
                     
             elif cmd == "stop":
                 try:
-                    # 停止巡航
+                    # 停止所有模式
                     if self.cruise_module:
                         self.cruise_module.stop_cruise()
+                    if self.linetrack_module:
+                        self.linetrack_module.stop_line_tracking()
                     
                     self.single_tello.emergency()
                     self.flying = False
@@ -567,6 +633,10 @@ class TelloExtendedController:
             # 停止巡航
             if self.cruise_module:
                 self.cruise_module.emergency_stop()
+            
+            # 停止巡线
+            if self.linetrack_module:
+                self.linetrack_module.stop_line_tracking()
             
             # 停止所有RC控制
             if self.flying and self.connected:

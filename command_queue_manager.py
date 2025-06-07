@@ -15,6 +15,7 @@ class CommandQueueManager:
         self.heartbeat_lock = threading.Lock()
         self.command_executing = False  # 标记是否正在执行命令
         self.heartbeat_interval = 2.0  # 心跳间隔（秒）
+        self.heartbeat_paused = False  # 新增：心跳暂停标志
         
         # 指令队列相关属性
         self.command_queue = queue.Queue()
@@ -38,19 +39,43 @@ class CommandQueueManager:
             self.heartbeat_thread.join(timeout=3)
         print("✓ 心跳机制已停止")
     
+    def pause_heartbeat(self):
+        """暂停心跳（执行指令时使用）"""
+        with self.heartbeat_lock:
+            self.heartbeat_paused = True
+    
+    def resume_heartbeat(self):
+        """恢复心跳（指令执行完成后使用）"""
+        with self.heartbeat_lock:
+            self.heartbeat_paused = False
+    
     def _heartbeat_worker(self):
-        """心跳工作线程"""
+        """心跳工作线程（优化版）"""
+        consecutive_failures = 0
+        max_failures = 5
+        
         while self.heartbeat_running and self.tello_controller.flying and self.tello_controller.connected:
             try:
                 with self.heartbeat_lock:
-                    # 只有在不执行命令时才发送心跳
-                    if not self.command_executing and self.tello_controller.flying:
+                    # 检查心跳是否被暂停或正在执行命令
+                    if self.heartbeat_paused or self.command_executing:
+                        # 心跳暂停期间不发送控制指令
+                        pass
+                    elif self.tello_controller.flying:
+                        # 只有在未暂停且飞行中时才发送心跳
                         self.tello_controller.single_tello.send_rc_control(0, 0, 0, 0)
+                        consecutive_failures = 0  # 重置失败计数
                 
                 time.sleep(self.heartbeat_interval)
                 
             except Exception as e:
-                print(f"❌ 心跳发送失败: {e}")
+                consecutive_failures += 1
+                print(f"❌ 心跳发送失败 ({consecutive_failures}/{max_failures}): {e}")
+                
+                if consecutive_failures >= max_failures:
+                    print("⚠ 心跳连续失败过多，可能连接中断")
+                    break
+                
                 time.sleep(1)  # 出错时短暂等待后继续
         
         print("💓 心跳线程已退出")
@@ -81,38 +106,54 @@ class CommandQueueManager:
                 
                 if command:
                     print(f"📤 从队列执行指令: {command}")
-                    success = self._execute_single_command_with_heartbeat(command)
                     
-                    if success:
-                        print(f"✅ 指令执行成功: {command}")
-                    else:
-                        print(f"❌ 指令执行失败: {command}")
-                        # 如果是关键指令失败，可以选择清空队列
-                        if command in ["takeoff", "land", "stop"]:
-                            print("⚠ 关键指令失败，清空剩余队列")
-                            self.clear_command_queue()
+                    # 暂停心跳，避免干扰指令执行
+                    self.pause_heartbeat()
+                    
+                    try:
+                        success = self._execute_single_command_with_heartbeat(command)
+                        
+                        if success:
+                            print(f"✅ 指令执行成功: {command}")
+                        else:
+                            print(f"❌ 指令执行失败: {command}")
+                            # 如果是关键指令失败，可以选择清空队列
+                            if command in ["takeoff", "land", "stop"]:
+                                print("⚠ 关键指令失败，清空剩余队列")
+                                self.clear_command_queue()
+                    finally:
+                        # 恢复心跳
+                        self.resume_heartbeat()
                     
                     # 指令间延迟，确保无人机稳定
-                    time.sleep(0.5)
+                    time.sleep(0.8)  # 稍微增加延迟，确保指令完全执行
                     
             except queue.Empty:
                 continue
             except Exception as e:
                 print(f"❌ 队列处理错误: {e}")
+                # 确保即使出错也恢复心跳
+                self.resume_heartbeat()
                 time.sleep(1)
         
         print("📥 指令队列处理器已退出")
     
     def _execute_single_command_with_heartbeat(self, command):
-        """执行单条指令（带心跳控制）"""
+        """执行单条指令（带心跳控制）- 针对长时间操作优化"""
         try:
-            # 标记开始执行命令，暂停心跳
+            # 检查是否为可能耗时的指令
+            long_running_commands = ["recognize_view", "capture_image", "start_video", "stop_video"]
+            is_long_running = any(cmd in command.lower() for cmd in long_running_commands)
+            
+            # 标记正在执行命令
             with self.heartbeat_lock:
                 self.command_executing = True
             
+            if is_long_running:
+                print(f"⏳ 执行长时间指令: {command}")
+                
             # 执行指令
             success = self._route_command(command)
-            
             return success
             
         except Exception as e:
@@ -132,6 +173,10 @@ class CommandQueueManager:
         if cmd in ["start_cruise", "stop_cruise", "cruise_status", "tof_distance"]:
             return self.tello_controller.execute_cruise_command(command)
         
+        # 检查是否为巡线指令
+        elif cmd in ["start_linetrack", "stop_linetrack", "linetrack_status"]:
+            return self.tello_controller.execute_linetrack_command(command)
+        
         # 检查是否为LED扩展指令
         elif cmd in ["led_color", "led_rgb", "led_breath", "led_blink", "display_text"]:
             return self.tello_controller.execute_led_command(command)
@@ -140,6 +185,15 @@ class CommandQueueManager:
         elif cmd in ["start_video", "stop_video", "capture_image", "recognize_view", 
                     "start_auto_recognition", "stop_auto_recognition", "vision_status", "show_video",
                     "test_speech_description"]:  # 添加测试语音描述指令
+            # 🔧 新增：对于视频相关指令，确保摄像头方向正确
+            if cmd in ["start_video", "capture_image", "recognize_view", "show_video"]:
+                try:
+                    print("📷 确保摄像头方向设置正确...")
+                    self.tello_controller.single_tello.set_video_direction(0)
+                    time.sleep(0.5)  # 短暂等待设置生效
+                except Exception as e:
+                    print(f"⚠ 摄像头方向设置警告: {e}")
+            
             return self.tello_controller.execute_vision_command(command)
         
         # 基本飞行指令

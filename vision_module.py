@@ -57,6 +57,16 @@ class VisionModule:
             
             print("📹 启动Tello视频流（编队模式）...")
             
+            # 🔧 新增：设置摄像头方向（强制要求）
+            print("📷 设置摄像头方向...")
+            try:
+                self.tello.set_video_direction(0)
+                print("✅ 摄像头方向设置成功")
+                time.sleep(1)  # 等待设置生效
+            except Exception as direction_error:
+                print(f"⚠ 摄像头方向设置失败: {direction_error}")
+                # 继续执行，不中断流程
+            
             # 第一步：发送streamon命令
             self.tello.streamon()
             print("✅ streamon命令已发送")
@@ -176,8 +186,8 @@ class VisionModule:
             self.frame_read = None
             return False
     
-    def _get_valid_frame(self, max_attempts=5):
-        """获取有效的视频帧（带重试机制）"""
+    def _get_valid_frame(self, max_attempts=10, skip_dark_frames=True):
+        """获取有效的视频帧（带重试机制和黑帧检测）"""
         if not self.video_streaming or not self.frame_read:
             return None
         
@@ -188,7 +198,18 @@ class VisionModule:
                 if frame is not None and frame.size > 0:
                     # 验证帧的基本属性
                     if len(frame.shape) >= 2 and frame.shape[0] > 0 and frame.shape[1] > 0:
-                        return frame
+                        
+                        # 🔧 新增：检测并跳过纯黑帧或过暗帧
+                        if skip_dark_frames and self._is_frame_too_dark(frame):
+                            print(f"⚫ 跳过过暗帧 ({attempt + 1}/{max_attempts})...")
+                            time.sleep(0.3)  # 稍等片刻再获取下一帧
+                            continue
+                        
+                        # 🔧 新增：基本图像质量检查
+                        if self._is_frame_quality_good(frame):
+                            return frame
+                        else:
+                            print(f"📷 帧质量不佳，重试 ({attempt + 1}/{max_attempts})...")
                 
                 print(f"⏳ 尝试获取有效帧 ({attempt + 1}/{max_attempts})...")
                 time.sleep(0.5)
@@ -199,6 +220,50 @@ class VisionModule:
         
         print("❌ 无法获取有效视频帧")
         return None
+    
+    def _is_frame_too_dark(self, frame, dark_threshold=15):
+        """检测帧是否过暗（纯黑或接近黑色）"""
+        try:
+            # 转换为灰度图计算平均亮度
+            if len(frame.shape) == 3:
+                gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+            else:
+                gray = frame
+            
+            mean_brightness = cv2.mean(gray)[0]
+            
+            # 如果平均亮度低于阈值，认为是暗帧
+            if mean_brightness < dark_threshold:
+                print(f"🔍 检测到暗帧，平均亮度: {mean_brightness:.1f}")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"⚠ 暗帧检测出错: {e}")
+            return False
+    
+    def _is_frame_quality_good(self, frame, variance_threshold=40):
+        """检测帧的基本质量"""
+        try:
+            # 转换为灰度图
+            if len(frame.shape) == 3:
+                gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+            else:
+                gray = frame
+            
+            # 计算图像方差（判断是否有足够的细节）
+            variance = cv2.Laplacian(gray, cv2.CV_64F).var()
+            
+            if variance < variance_threshold:
+                print(f"📷 帧细节不足，方差: {variance:.1f}")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            print(f"⚠ 帧质量检测出错: {e}")
+            return True  # 出错时假设质量良好
 
     def capture_image(self, filename=None):
         """捕获当前视频帧并保存为图片（增强版错误处理）"""
@@ -255,19 +320,27 @@ class VisionModule:
             print(f"❌ 捕获图片异常: {e}")
             return None
     
-    def capture_temp_image(self):
-        """捕获临时图片（用于识别后删除）- 增强版"""
+    def capture_temp_image(self, max_frame_attempts=15):
+        """捕获临时图片（用于识别后删除）- 增强版避免黑帧"""
         try:
             if not self.video_streaming or not self.frame_read:
                 print("❌ 视频流未启动，无法捕获临时图片")
                 return None
             
-            # 使用增强的帧获取方法
-            frame = self._get_valid_frame()
+            print("📸 正在获取高质量视频帧用于识别...")
+            
+            # 使用增强的帧获取方法（更多重试次数，严格质量检查）
+            frame = self._get_valid_frame(max_attempts=max_frame_attempts, skip_dark_frames=True)
             
             if frame is None:
                 print("❌ 无法获取有效视频帧")
                 return None
+            
+            # 输出帧的基本信息用于调试
+            if len(frame.shape) == 3:
+                gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+                mean_brightness = cv2.mean(gray)[0]
+                print(f"✅ 获得高质量帧，亮度: {mean_brightness:.1f}")
             
             # 🔧 修复：将RGB转换为BGR格式
             try:
@@ -284,8 +357,10 @@ class VisionModule:
             success = cv2.imwrite(temp_filepath, frame_bgr)
             
             if success and os.path.exists(temp_filepath):
+                print(f"📸 临时图片已保存: {temp_filepath}")
                 return temp_filepath
             else:
+                print("❌ 临时图片保存失败")
                 return None
                 
         except Exception as e:
@@ -302,6 +377,15 @@ class VisionModule:
             
             # 等待一段时间
             time.sleep(3)
+            
+            # 🔧 新增：重启时也设置摄像头方向
+            print("📷 重新设置摄像头方向...")
+            try:
+                self.tello.set_video_direction(0)
+                print("✅ 摄像头方向重新设置成功")
+                time.sleep(0.5)
+            except Exception as direction_error:
+                print(f"⚠ 摄像头方向重新设置失败: {direction_error}")
             
             # 重新启动
             success = self.start_video_stream()
@@ -338,15 +422,38 @@ class VisionModule:
         return status
 
     def recognize_current_view(self, save_image=True, baike_num=0, auto_describe=None):
-        """识别当前视野中的物体"""
+        """识别当前视野中的物体（带心跳保持）"""
+        heartbeat_thread = None
+        heartbeat_running = False
+        
         try:
+            # 🔧 新增：启动识别期间的心跳保持
+            if hasattr(self, 'tello') and self.tello and hasattr(self.tello, 'send_rc_control'):
+                print("💓 启动识别期间心跳保持...")
+                heartbeat_running = True
+                heartbeat_thread = threading.Thread(
+                    target=self._maintain_heartbeat_during_recognition, 
+                    args=(lambda: heartbeat_running,), 
+                    daemon=True
+                )
+                heartbeat_thread.start()
+            
             # 捕获当前图片
-            image_path = self.capture_image() if save_image else self.capture_temp_image()
+            print("🔍 开始图像识别流程...")
+            
+            if save_image:
+                image_path = self.capture_image()
+            else:
+                # 使用增强的临时图片捕获（避免黑帧）
+                image_path = self.capture_temp_image(max_frame_attempts=15)
             
             if not image_path:
+                print("❌ 图片捕获失败")
                 return None
             
-            # 识别图片
+            print("🤖 正在调用百度图像识别API...")
+            
+            # 识别图片 - 这个过程可能耗时较长
             result = self.baidu_vision.recognize_image_file(image_path, baike_num)
             
             if result:
@@ -363,7 +470,16 @@ class VisionModule:
                 # 生成智能描述并播报
                 should_describe = auto_describe if auto_describe is not None else self.auto_description_enabled
                 if should_describe:
+                    print("🗣 开始生成智能描述...")
                     self._generate_and_speak_description(result)
+                
+                # 清理临时文件
+                if not save_image and image_path and os.path.exists(image_path):
+                    try:
+                        os.remove(image_path)
+                        print("🗑️ 临时识别文件已清理")
+                    except:
+                        pass
                 
                 return result
             else:
@@ -375,7 +491,34 @@ class VisionModule:
         except Exception as e:
             print(f"❌ 识别当前视野异常: {e}")
             return None
+        finally:
+            # 🔧 停止心跳保持
+            if heartbeat_thread and heartbeat_running:
+                print("💓 停止识别期间心跳保持")
+                heartbeat_running = False
+                try:
+                    heartbeat_thread.join(timeout=2)
+                except:
+                    pass
     
+    def _maintain_heartbeat_during_recognition(self, should_continue):
+        """在识别过程中维持心跳（独立线程）"""
+        try:
+            while should_continue():
+                try:
+                    # 发送悬停指令保持连接
+                    if hasattr(self, 'tello') and self.tello:
+                        self.tello.send_rc_control(0, 0, 0, 0)
+                    
+                    time.sleep(1.5)  # 每1.5秒发送一次心跳
+                    
+                except Exception as e:
+                    print(f"⚠ 识别心跳发送失败: {e}")
+                    time.sleep(1)
+        
+        except Exception as e:
+            print(f"❌ 识别心跳线程异常: {e}")
+
     def _generate_and_speak_description(self, recognition_result):
         """生成智能描述并语音播报"""
         try:
@@ -468,7 +611,10 @@ class VisionModule:
         print("✅ 自动识别已停止")
     
     def _auto_recognition_worker(self):
-        """自动识别工作线程"""
+        """自动识别工作线程（优化版）"""
+        consecutive_failures = 0
+        max_failures = 3  # 连续失败3次后暂停
+        
         while self.recognition_running and self.auto_recognition:
             try:
                 current_time = time.time()
@@ -477,18 +623,36 @@ class VisionModule:
                 if current_time - self.last_recognition_time >= self.recognition_interval:
                     self.last_recognition_time = current_time
                     
-                    # 执行识别（不保存图片，启用描述）
+                    print("🔍 自动识别开始...")
+                    
+                    # 执行识别（不保存图片，启用描述，带心跳保持）
                     result = self.recognize_current_view(save_image=False, auto_describe=True)
                     
                     if result:
-                        # 可以在这里添加识别结果的处理逻辑
-                        pass
+                        consecutive_failures = 0  # 重置失败计数
+                        print("✅ 自动识别成功")
+                    else:
+                        consecutive_failures += 1
+                        print(f"❌ 自动识别失败 ({consecutive_failures}/{max_failures})")
+                        
+                        # 连续失败过多，暂停自动识别
+                        if consecutive_failures >= max_failures:
+                            print("⚠ 连续识别失败过多，暂停自动识别")
+                            self.auto_recognition = False
+                            self.speech_synthesis.speak("视觉识别出现问题，已暂停自动识别")
+                            break
                 
                 time.sleep(1)  # 每秒检查一次
                 
             except Exception as e:
                 print(f"❌ 自动识别线程错误: {e}")
+                consecutive_failures += 1
                 time.sleep(2)
+                
+                if consecutive_failures >= max_failures:
+                    print("⚠ 自动识别线程错误过多，停止自动识别")
+                    self.auto_recognition = False
+                    break
     
     def toggle_auto_description(self):
         """切换自动描述功能"""
